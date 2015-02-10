@@ -1,0 +1,595 @@
+###############################################################################
+## functions
+###############################################################################
+get_design_matrix = function(MM, training_or_testing="testing") {
+  ## get the design matrix of the pair-wise interaction regression model
+  top_M_snp = valid_snps[order(valid_snp_chisq, decreasing=TRUE)[1:MM]]
+  if (training_or_testing == "testing") {
+    top_snp_data = testing_data[, match(top_M_snp, names(testing_data))]
+  } else {
+    top_snp_data = training_data[, match(top_M_snp, names(training_data))]
+  }
+  pairwise_interact_formula = sprintf("~(%s)^2",
+                                      paste(names(top_snp_data), collapse='+'))
+  design_matrix = model.matrix(formula(pairwise_interact_formula),
+                               top_snp_data)
+  design_matrix
+}
+
+
+validate.f = function(XX, yy, beta) {
+  ## this is the validation function
+  NN = nrow(XX)
+  ss = 0
+  for (ii in 1:nrow(XX)) {
+    ss = ss + yy[ii] * sum(XX[ii, ] * beta) - log(1 + exp(sum(XX[ii, ] * beta)))
+  }
+  return(1 / NN * ss)
+}
+
+get_kappa = function(MM, norm=2) {
+  ## get upper bound of the the p-norm of the gradient, which has the form xx^T
+  if (norm==2) {
+    kappa = sqrt(8 * MM^2 - 4 * MM)
+  }
+  if (norm==1) {
+    kappa = 2 * MM^2
+  }
+  kappa
+}
+
+get_convex_min = function(MM, NN, epsilon, norm=2) {
+  ## get the minimum strong convexity parameter
+  kappa = get_kappa(MM, norm)
+  kappa^2 / (NN *  (exp(epsilon / 4) - 1))
+}
+
+###############################################################################
+## constants and experiment parameters
+###############################################################################
+MM_vec = c(5) ## top M SNPs
+epsilon_vec = c(0.5, 1, 5, 10)
+alpha_vec = c(0.1, 0.5, 0.9)
+coef_thresh_ratio = 1e-2 # ignore coefficients if |coef| / |largest_coef| < coef_thresh_ratio
+
+
+true_snps = c("rs4111409", "rs2324591")
+main_effect_set = true_snps
+interaction_set = c(paste(main_effect_set, collapse=':'),
+                    paste(main_effect_set[2:1], collapse=':'))
+all_effect_set = c(main_effect_set, interaction_set)
+
+###############################################################################
+## Load data
+###############################################################################
+source('./analyze_hapsample.R')
+NN = nrow(testing_data)
+
+if (FALSE) {
+  ## the "simulation_for_paper.R" script should have been run.
+  source("./simulation_for_paper.R")
+}
+
+library(glmnet)
+
+
+
+###############################################################################
+## handle noisy results
+###############################################################################
+
+
+load("./noisy_result.RData")
+
+delta = 0.1
+nn_sim = 100 ## number of simulations
+nn_lambda = 5 ## number of regularization parameters
+
+
+
+##########################################
+## obtain validation scores
+##########################################
+yy = as.numeric(testing_data$status) - 1
+
+validation_score_dtf = c()
+for (ii in 1:length(noisy_result)) {
+  for (MM in MM_vec) {
+    design_matrix = get_design_matrix(MM)
+    for (epsilon in epsilon_vec) {
+      for (alpha in alpha_vec) {
+        result_by_lambda = noisy_result[[ii]][[paste(MM)]][[paste(epsilon)]][[paste(alpha)]]
+        for (res in result_by_lambda) {
+          lambda = res$params$lambda
+          score = validate.f(design_matrix, yy, res$optim_result$estimate)
+          validation_score_dtf = rbind(validation_score_dtf,
+                                       c(iter=ii, MM=MM, epsilon=epsilon,
+                                         alpha=alpha, lambda=lambda,
+                                         score=score))
+        }
+      }
+    }
+  }
+}
+validation_score_dtf = as.data.frame(validation_score_dtf)
+
+
+##########################################
+## obtain betas and other parameters
+##########################################
+param_dtf = c()
+for (MM in MM_vec) {
+  for (epsilon in epsilon_vec) {
+    for (alpha in alpha_vec) {
+      kappa = get_kappa(MM)
+      result_by_lambda = noisy_result[[1]][[paste(MM)]][[paste(epsilon)]][[paste(alpha)]]
+      phi = result_by_lambda[[1]]$params$phi
+      noise_scale = result_by_lambda[[1]]$params$noise_scale
+      lambda_convex_min = kappa^2 / (NN *  (exp(epsilon / 4) - 1))
+      lambda_vec = sapply(result_by_lambda, function(ee) ee$params$lambda)
+      names(lambda_vec) = paste("lam", c(1:length(lambda_vec)), sep='')
+      beta1 = 2 * kappa * kappa / lambda_convex_min
+      beta2 = min(1, kappa / lambda_convex_min * (kappa + noise_scale * delta))
+      use_delta = ifelse(beta2 < 1, TRUE, FALSE)
+      param_dtf = rbind(param_dtf,
+                        c(MM=MM, epsilon=epsilon, alpha=alpha,
+                          kappa=kappa, phi=phi, noise_scale=noise_scale,
+                          lambda_convex_min=lambda_convex_min,
+                          beta1=beta1, beta2=beta2, use_delta=use_delta,
+                          lambda_vec))
+    }
+  }
+}
+param_dtf = as.data.frame(param_dtf)
+
+
+
+
+############################################
+## sample a lambda differentially privately
+############################################
+
+best_lambda_dtf = c()
+for (ii in 1:nn_sim) {
+  for (MM in MM_vec) {
+    for (epsilon in epsilon_vec) {
+      for (alpha in alpha_vec) {
+        ## get beta
+        param_idx = (param_dtf$MM == MM) &
+          (param_dtf$epsilon == epsilon) &
+          (param_dtf$alpha == alpha)
+        beta1 = param_dtf[param_idx, "beta1"][1]
+        beta2 = param_dtf[param_idx, "beta2"][1]
+        beta = max(beta1 / nrow(training_data), beta2 / nrow(testing_data))
+        ## get validation scores
+        val_score_idx = (validation_score_dtf$iter == ii) &
+          (validation_score_dtf$MM == MM) &
+          (validation_score_dtf$epsilon == epsilon) &
+          (validation_score_dtf$alpha == alpha)
+        score_vec = validation_score_dtf[val_score_idx, "score"]
+        lambda_vec = validation_score_dtf[val_score_idx, "lambda"]
+        ## perturbed scores
+        perturbed_score_vec = score_vec + 2 * beta * rexp(length(score_vec), rate=epsilon)
+        best_lambda = lambda_vec[which.max(perturbed_score_vec)]
+        best_lambda_dtf = rbind(best_lambda_dtf,
+          c(iter=ii, MM=MM, epsilon=epsilon, alpha=alpha, best_lambda=best_lambda))
+      }
+    }
+  }
+}
+best_lambda_dtf = as.data.frame(best_lambda_dtf)
+
+
+##########################################
+## get model corresponding to the best lambda
+##########################################
+
+best_model_list = list()
+for (ii in 1:length(noisy_result)) {
+  best_model_list[[ii]] = list()
+  for (MM in MM_vec) {
+    best_model_list[[ii]][[paste(MM)]] = list()
+    for (epsilon in epsilon_vec) {
+      best_model_list[[ii]][[paste(MM)]][[paste(epsilon)]] = list()
+      for (alpha in alpha_vec) {
+        best_lambda_idx = (best_lambda_dtf$iter == ii) &
+          (best_lambda_dtf$MM == MM) &
+          (best_lambda_dtf$epsilon == epsilon) &
+          (best_lambda_dtf$alpha == alpha)
+        best_lambda = best_lambda_dtf[best_lambda_idx, 'best_lambda']
+        best_model_list[[ii]][[paste(MM)]][[paste(epsilon)]][[paste(alpha)]] = noisy_result[[ii]][[paste(MM)]][[paste(epsilon)]][[paste(alpha)]][[paste(best_lambda)]]
+      }
+    }
+  }
+}
+
+
+
+##########################################
+## calculate utility (sensitivity)
+##########################################
+
+freq_dtf = c()
+for (ii in 1:length(noisy_result)) {
+  for (MM in MM_vec) {
+    design_matrix = get_design_matrix(MM)
+    for (epsilon in epsilon_vec) {
+      for (alpha in alpha_vec) {
+        best_model = best_model_list[[ii]][[paste(MM)]][[paste(epsilon)]][[paste(alpha)]]
+        coef_vec = best_model$optim_result$estimate
+        top_coef_idx = (abs(coef_vec) / max(abs(coef_vec)) > coef_thresh_ratio)
+        top_coef_name = colnames(design_matrix)[-1][top_coef_idx[-1]] # ignore intercept
+        recovered_interaction = sum(top_coef_name %in% interaction_set)
+        recovered_main_effcts = sum(top_coef_name %in% main_effect_set)
+        recovered_all = (recovered_interaction + recovered_main_effcts == 3)
+        freq_dtf = rbind(freq_dtf,
+                         c(iter=ii, MM=MM, epsilon=epsilon, alpha=alpha,
+                           recovered_interaction=recovered_interaction,
+                           recovered_main_effcts=recovered_main_effcts,
+                           recovered_all=recovered_all))
+      }
+    }
+  }
+}
+freq_dtf = as.data.frame(freq_dtf)
+
+
+
+util_dtf = c()
+for (MM in MM_vec) {
+  for (epsilon in epsilon_vec) {
+    for (alpha in alpha_vec) {
+      idx = (freq_dtf$MM == MM) &
+        (freq_dtf$epsilon == epsilon) &
+        (freq_dtf$alpha == alpha)
+      sub_dtf = freq_dtf[idx, ]
+      util_dtf = rbind(util_dtf,
+                       c(MM=MM, epsilon=epsilon, alpha=alpha,
+                         recovered_interaction=mean(sub_dtf$recovered_interaction),
+                         recovered_main_effcts=mean(sub_dtf$recovered_main_effcts) / 2,
+                         recovered_all=mean(sub_dtf$recovered_all)))
+    }
+  }
+}
+util_dtf = as.data.frame(util_dtf)
+util_dtf$alpha = as.factor(util_dtf$alpha)
+util_dtf$epsilon = factor(util_dtf$epsilon)
+util_dtf$epsilon = factor(util_dtf$epsilon, levels=levels(util_dtf$epsilon)[c(3, 4, 1, 2)])
+
+
+##########################################
+## calculate specificity
+##########################################
+
+specificity_freq_dtf = c()
+for (ii in 1:length(noisy_result)) {
+  for (MM in MM_vec) {
+    design_matrix = get_design_matrix(MM)
+    for (epsilon in epsilon_vec) {
+      for (alpha in alpha_vec) {
+        bets_model = best_model_list[[ii]][[paste(MM)]][[paste(epsilon)]][[paste(alpha)]]
+        coef_vec = bets_model$optim_result$estimate
+        top_coef_idx = (abs(coef_vec) / max(abs(coef_vec)) > coef_thresh_ratio)
+        top_coef_name = colnames(design_matrix)[-1][top_coef_idx[-1]] # ignore intercept
+        no_wrong_snp = all(top_coef_name %in% all_effect_set)
+
+        specificity_freq_dtf = rbind(specificity_freq_dtf,
+                         c(iter=ii, MM=MM, epsilon=epsilon, alpha=alpha,
+                           no_wrong_snp=no_wrong_snp))
+      }
+    }
+  }
+}
+specificity_freq_dtf = as.data.frame(specificity_freq_dtf)
+
+
+
+specificity_util_dtf = c()
+for (MM in MM_vec) {
+  for (epsilon in epsilon_vec) {
+    for (alpha in alpha_vec) {
+      idx = (specificity_freq_dtf$MM == MM) &
+        (specificity_freq_dtf$epsilon == epsilon) &
+        (specificity_freq_dtf$alpha == alpha)
+      sub_dtf = specificity_freq_dtf[idx, ]
+      specificity_util_dtf = rbind(specificity_util_dtf,
+                       c(MM=MM, epsilon=epsilon, alpha=alpha,
+                         specificity=mean(sub_dtf$no_wrong_snp)))
+    }
+  }
+}
+specificity_util_dtf = as.data.frame(specificity_util_dtf)
+specificity_util_dtf$alpha = as.factor(specificity_util_dtf$alpha)
+specificity_util_dtf$epsilon = factor(specificity_util_dtf$epsilon)
+# levels(specificity_util_dtf$epsilon) = sapply(levels(specificity_util_dtf$epsilon),
+#                                                function(ee) sprintf("epsilon=%s",ee))
+specificity_util_dtf$epsilon = factor(specificity_util_dtf$epsilon, levels=levels(specificity_util_dtf$epsilon)[c(3, 4, 1, 2)])
+
+
+
+##########################################
+## make some plots for experiment with noisy data
+##########################################
+require(ggplot2)
+require(lattice)
+
+
+
+pdf("RU_barchart.pdf", width=6, height=4)
+
+
+epsilon_labels = sapply(levels(util_dtf$epsilon), function(ee) {
+  convex_min = get_convex_min(util_dtf$MM[1], NN, as.numeric(ee))
+  as.expression(substitute(paste(epsilon, "=", ee, ',  convex_min=', convex_min,  sep=''),
+                           list(ee=ee, convex_min=round(convex_min, 2))))
+})
+
+barchart(recovered_interaction + recovered_main_effcts + recovered_all ~ alpha | epsilon,
+         data=util_dtf,
+         scales = list(x = list("free", cex=1.2), y=list(cex=1.2)),
+         par.settings=list(superpose.polygon=list(col=rainbow(3))),
+         layout = c(round(length(epsilon_vec)/2),2),
+         strip=strip.custom(factor.levels=epsilon_labels),
+         horizontal = FALSE,
+         xlab=list(expression(alpha), cex=2),
+         ylab=list("Frequency", cex=2),
+         auto.key = list(columns=3, cex=2, size = 1, between = 0.5,
+                         points=FALSE, rectangles=TRUE,
+                         text=c("interaction", "main effects", "all")),
+         panel = function( x,y,...) {
+           panel.abline( h=0, lty = "dotted", col = "black", lwd=1.5)
+           panel.abline( h=1, lty = "dotted", col = "black", lwd=1.5)
+           panel.barchart( x,y,...)})
+
+
+epsilon_labels = sapply(levels(specificity_util_dtf$epsilon), function(ee) {
+  convex_min = get_convex_min(specificity_util_dtf$MM[1], NN, as.numeric(ee))
+  as.expression(substitute(paste('convex_min=', convex_min,  sep=''),
+                           list(convex_min=round(convex_min, 2))))
+})
+
+
+barchart(specificity ~ alpha | epsilon,
+         data=specificity_util_dtf,
+         scales = list(x = list("free", cex=1.2), y=list(cex=1.2)),
+         layout = c(round(length(epsilon_vec)/2),2),
+         strip=strip.custom(factor.levels=epsilon_labels),
+         horizontal = FALSE,
+         xlab=list(expression(alpha), cex=2),
+         ylab=list("Frequency", cex=2),
+         auto.key = list(columns=1, cex=2, size = 1, between = 0.5,
+                         points=FALSE, rectangles=TRUE,
+                         text=c("specificity")),
+         panel = function( x,y,...) {
+           panel.abline( h=0, lty = "dotted", col = "black", lwd=1.5)
+           panel.abline( h=1, lty = "dotted", col = "black", lwd=1.5)
+           panel.barchart( x,y,...)})
+
+dev.off()
+
+
+
+###############################################################################
+## get result with no noise
+###############################################################################
+load('./no_noise_result.RData')
+
+
+## get validation scores
+no_noise_validation_score_dtf = c()
+for (MM in MM_vec) {
+  design_matrix = get_design_matrix(MM, "training")
+  yy = as.numeric(testing_data$status) - 1
+  for (epsilon in epsilon_vec) {
+    for (alpha in alpha_vec) {
+      result_by_lambda = no_noise_result[[paste(MM)]][[paste(epsilon)]][[paste(alpha)]]
+      for (res in result_by_lambda) {
+        lambda = res$params$lambda
+        score = validate.f(design_matrix, yy, res$optim_result$estimate)
+        no_noise_validation_score_dtf = rbind(no_noise_validation_score_dtf,
+                                     c(MM=MM, epsilon=epsilon, alpha=alpha, lambda=lambda, score=score))
+      }
+    }
+  }
+}
+no_noise_validation_score_dtf = as.data.frame(no_noise_validation_score_dtf, stringsAsFactors=FALSE)
+no_noise_validation_score_dtf$score = as.numeric(no_noise_validation_score_dtf$score)
+
+
+## get best no noise model
+
+no_noise_best_model_list = list()
+for (ii in 1:length(no_noise_result)) {
+  no_noise_best_model_list[[ii]] = list()
+  for (MM in MM_vec) {
+    no_noise_best_model_list[[ii]][[paste(MM)]] = list()
+    for (epsilon in epsilon_vec) {
+      no_noise_best_model_list[[ii]][[paste(MM)]][[paste(epsilon)]] = list()
+      for (alpha in alpha_vec) {
+        val_score_idx = (no_noise_validation_score_dtf$MM == MM) &
+          (no_noise_validation_score_dtf$epsilon == epsilon) &
+          (no_noise_validation_score_dtf$alpha == alpha)
+        lambda_vec = no_noise_validation_score_dtf[val_score_idx, "lambda"]
+        score_vec = no_noise_validation_score_dtf[val_score_idx, "score"]
+        best_lambda = lambda_vec[which.max(score_vec)]
+        no_noise_best_model_list[[paste(MM)]][[paste(epsilon)]][[paste(alpha)]] = no_noise_result[[paste(MM)]][[paste(epsilon)]][[paste(alpha)]][[paste(best_lambda)]]
+      }
+    }
+  }
+}
+
+
+##########################################
+## get utility (sensitivity): no noise
+##########################################
+
+no_noise_freq_dtf = c()
+ii = -1
+for (MM in MM_vec) {
+  design_matrix = get_design_matrix(MM)
+  for (epsilon in epsilon_vec) {
+    for (alpha in alpha_vec) {
+      bets_model = no_noise_best_model_list[[paste(MM)]][[paste(epsilon)]][[paste(alpha)]]
+      coef_vec = bets_model$optim_result$estimate
+      top_coef_idx = (abs(coef_vec) / max(abs(coef_vec)) > coef_thresh_ratio)
+      top_coef_name = colnames(design_matrix)[-1][top_coef_idx[-1]] # ignore intercept
+      recovered_interaction = sum(top_coef_name %in% interaction_set)
+      recovered_main_effcts = sum(top_coef_name %in% main_effect_set)
+      recovered_all = (recovered_interaction + recovered_main_effcts == 3)
+      no_noise_freq_dtf = rbind(no_noise_freq_dtf,
+                       c(iter=ii, MM=MM, epsilon=epsilon, alpha=alpha,
+                         recovered_interaction=recovered_interaction,
+                         recovered_main_effcts=recovered_main_effcts,
+                         recovered_all=recovered_all))
+    }
+  }
+}
+no_noise_freq_dtf = as.data.frame(no_noise_freq_dtf, stringsAsFactors=FALSE)
+no_noise_freq_dtf$recovered_interaction = as.numeric(no_noise_freq_dtf$recovered_interaction)
+no_noise_freq_dtf$recovered_main_effcts = as.numeric(no_noise_freq_dtf$recovered_main_effcts)
+no_noise_freq_dtf$recovered_all = as.logical(no_noise_freq_dtf$recovered_all)
+
+
+
+
+no_noise_util_dtf = c()
+for (MM in MM_vec) {
+  for (epsilon in epsilon_vec) {
+    for (alpha in alpha_vec) {
+      idx = (no_noise_freq_dtf$MM == MM) &
+        (no_noise_freq_dtf$epsilon == epsilon) &
+        (no_noise_freq_dtf$alpha == alpha)
+      sub_dtf = no_noise_freq_dtf[idx, ]
+      no_noise_util_dtf = rbind(no_noise_util_dtf,
+                       c(MM=MM, epsilon=epsilon, alpha=alpha,
+                         recovered_interaction=mean(sub_dtf$recovered_interaction),
+                         recovered_main_effcts=mean(sub_dtf$recovered_main_effcts) / 2,
+                         recovered_all=mean(sub_dtf$recovered_all)))
+    }
+  }
+}
+no_noise_util_dtf = as.data.frame(no_noise_util_dtf, stringsAsFactors=FALSE)
+no_noise_util_dtf$recovered_interaction = as.numeric(no_noise_util_dtf$recovered_interaction)
+no_noise_util_dtf$recovered_main_effcts = as.numeric(no_noise_util_dtf$recovered_main_effcts)
+no_noise_util_dtf$recovered_all = as.numeric(no_noise_util_dtf$recovered_all)
+no_noise_util_dtf$alpha = as.factor(no_noise_util_dtf$alpha)
+no_noise_util_dtf$epsilon = factor(no_noise_util_dtf$epsilon)
+no_noise_util_dtf$epsilon = factor(no_noise_util_dtf$epsilon,
+                                   levels=levels(no_noise_util_dtf$epsilon)[c(3,4,1,2)])
+
+
+##########################################
+## calculate specificity: no noise
+##########################################
+
+
+ii= - 1
+no_noise_specificity_freq_dtf = c()
+for (MM in MM_vec) {
+  design_matrix = get_design_matrix(MM)
+  for (epsilon in epsilon_vec) {
+    for (alpha in alpha_vec) {
+      bets_model = no_noise_best_model_list[[paste(MM)]][[paste(epsilon)]][[paste(alpha)]]
+      coef_vec = bets_model$optim_result$estimate
+      top_coef_idx = (abs(coef_vec) / max(abs(coef_vec)) > coef_thresh_ratio)
+      top_coef_name = colnames(design_matrix)[-1][top_coef_idx[-1]] # ignore intercept
+      no_wrong_snp = all(top_coef_name %in% all_effect_set)
+
+      no_noise_specificity_freq_dtf = rbind(no_noise_specificity_freq_dtf,
+                                   c(iter=ii, MM=MM, epsilon=epsilon, alpha=alpha,
+                                     no_wrong_snp=no_wrong_snp))
+    }
+  }
+}
+no_noise_specificity_freq_dtf = as.data.frame(no_noise_specificity_freq_dtf, stringAsFactor=FALSE)
+no_noise_specificity_freq_dtf$no_wrong_snp = as.logical(no_noise_specificity_freq_dtf$no_wrong_snp)
+
+
+
+
+
+no_noise_specificity_util_dtf = c()
+for (MM in MM_vec) {
+  for (epsilon in epsilon_vec) {
+    for (alpha in alpha_vec) {
+      idx = (no_noise_specificity_freq_dtf$MM == MM) &
+        (no_noise_specificity_freq_dtf$epsilon == epsilon) &
+        (no_noise_specificity_freq_dtf$alpha == alpha)
+      sub_dtf = no_noise_specificity_freq_dtf[idx, ]
+      no_noise_specificity_util_dtf = rbind(no_noise_specificity_util_dtf,
+                                   c(MM=MM, epsilon=epsilon, alpha=alpha,
+                                     specificity=mean(sub_dtf$no_wrong_snp)))
+    }
+  }
+}
+no_noise_specificity_util_dtf = as.data.frame(no_noise_specificity_util_dtf, stringsAsFactors=FALSE)
+no_noise_specificity_util_dtf$specificity = as.numeric(no_noise_specificity_util_dtf$specificity)
+
+no_noise_specificity_util_dtf$alpha = as.factor(no_noise_specificity_util_dtf$alpha)
+no_noise_specificity_util_dtf$epsilon = factor(no_noise_specificity_util_dtf$epsilon)
+# levels(no_noise_specificity_util_dtf$epsilon) = sapply(levels(no_noise_specificity_util_dtf$epsilon),
+#                                               function(ee) sprintf("epsilon=%s",ee))
+# no_noise_specificity_util_dtf$epsilon = factor(no_noise_specificity_util_dtf$epsilon,
+#                                                levels=levels(no_noise_specificity_util_dtf$epsilon)[c(4, 3, 5, 1, 2)])
+no_noise_specificity_util_dtf$epsilon = factor(no_noise_specificity_util_dtf$epsilon,
+                                               levels=levels(no_noise_specificity_util_dtf$epsilon)[c(3,4,1,2)])
+
+
+
+##########################################
+## make some plots including no noise
+##########################################
+require(ggplot2)
+require(lattice)
+
+
+
+pdf("RU_barchart_with_no_noise.pdf", width=6, height=4)
+
+
+epsilon_labels = sapply(levels(no_noise_util_dtf$epsilon), function(ee) {
+  convex_min = get_convex_min(no_noise_util_dtf$MM[1], NN, as.numeric(ee))
+  as.expression(substitute(paste('convex_min=', convex_min,  sep=''),
+                           list(convex_min=round(convex_min, 2))))
+})
+
+barchart(recovered_interaction + recovered_main_effcts + recovered_all ~ alpha | epsilon,
+         data=no_noise_util_dtf,
+         scales = list(x = list("free", cex=1.5), y=list(cex=1.2)),
+         par.settings=list(superpose.polygon=list(col=rainbow(3))),
+         layout = c(ceiling(length(epsilon_vec)/2), 2),
+         strip=strip.custom(factor.levels=epsilon_labels),
+         horizontal = FALSE,
+         xlab=list(expression(alpha), cex=2),
+         ylab=list("Utility", cex=2),
+         auto.key = list(columns=3, cex=2, size = 1, between = 0.5,
+                         points=FALSE, rectangles=TRUE,
+                         text=c("interaction", "main effects", "all")),
+         panel = function( x,y,...) {
+           panel.abline( h=0, lty = "dotted", col = "black", lwd=1.5)
+           panel.abline( h=1, lty = "dotted", col = "black", lwd=1.5)
+           panel.barchart( x,y,...)})
+
+
+epsilon_labels = sapply(levels(no_noise_specificity_util_dtf$epsilon), function(ee) {
+  convex_min = get_convex_min(no_noise_specificity_util_dtf$MM[1], NN, as.numeric(ee))
+  as.expression(substitute(paste('convex_min=', convex_min,  sep=''),
+                           list(convex_min=round(convex_min, 2))))
+})
+barchart(specificity ~ alpha | epsilon,
+         data=no_noise_specificity_util_dtf,
+         scales = list(x = list("free", cex=1.5), y=list(cex=1.2)),
+         layout = c(ceiling(length(epsilon_vec)/2), 2),
+         strip=strip.custom(factor.levels=epsilon_labels),
+         horizontal = FALSE,
+         xlab=list(expression(alpha), cex=2),
+         ylab=list("Utility", cex=2),
+         auto.key = list(columns=1, cex=2, size = 1, between = 0.5,
+                         points=FALSE, rectangles=TRUE,
+                         text=c("specificity")),
+         panel = function( x,y,...) {
+           panel.abline( h=0, lty = "dotted", col = "black", lwd=1.5)
+           panel.abline( h=1, lty = "dotted", col = "black", lwd=1.5)
+           panel.barchart( x,y,...)})
+
+dev.off()
