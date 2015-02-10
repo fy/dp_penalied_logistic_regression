@@ -1,5 +1,7 @@
-require("multicore")
-options(cores=multicore:::detectCores())
+## This function performs differentially private elastic-net penalized logistic 
+## regression multiple times and saves the results to an RData file. It also
+## performs non-private penalized logistic regression and saves the results to 
+## an RData file.
 
 ###############################################################################
 ## load data

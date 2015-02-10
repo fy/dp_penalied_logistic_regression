@@ -1,3 +1,5 @@
+## This is a helper function. It is a wrapper for running CVX for MATLAB in R.
+
 run_cvx <- function(XX, yy, lambda, alpha, noise, noise_scale){
   ## Save data to Matlab data file
   writeMat('cvx_data.mat', XX=XX, yy=yy, lambda=lambda, alpha_var=alpha,
