@@ -1,1 +1,1 @@
-# Differentially private penalized logistic regression.
+# Differentially private penalized logistic regression
