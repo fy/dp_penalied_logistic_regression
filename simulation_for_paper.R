@@ -1,15 +1,12 @@
-## This function performs differentially private elastic-net penalized logistic 
+## This function performs differentially private elastic-net penalized logistic
 ## regression multiple times and saves the results to an RData file. It also
-## performs non-private penalized logistic regression and saves the results to 
+## performs non-private penalized logistic regression and saves the results to
 ## an RData file.
 
 ###############################################################################
 ## load data
 ###############################################################################
-
 source('./analyze_hapsample.R')
-
-
 
 ###############################################################################
 ## functions
@@ -59,9 +56,6 @@ rB2 = function(deg) {
   YY * WW / sqrt(sum(WW^2))
 }
 
-
-
-
 ###############################################################################
 ## simulation parameters
 ###############################################################################
@@ -102,13 +96,12 @@ for (MM_res in param_list) {
 }
 param_dtf= as.data.frame(param_dtf)
 
-
 ###############################################################################
 ## Run simulation on a separate dataset to obtain the **optimal regularization
 ## constants**. At the moment, use the validation dataset. In the future,
 ## should use a new one.
 ###############################################################################
-require(glmnet)
+library(glmnet)
 
 glmnet_results = lapply(MM_vec, function(MM) {
   ## only use top MM SNPs
@@ -122,9 +115,6 @@ glmnet_results = lapply(MM_vec, function(MM) {
 })
 names(glmnet_results) = sapply(MM_vec, paste)
 
-
-
-
 ###############################################################################
 ## Simulations.
 ###############################################################################
@@ -132,7 +122,6 @@ names(glmnet_results) = sapply(MM_vec, paste)
 ##########################################
 ## helper functions
 ##########################################
-
 sim_result = function(MM, epsilon, alpha, lambda, phi, noisy=TRUE) {
   ## aggregate the simulation results
   design_matrix = get_design_matrix(MM)
@@ -158,7 +147,6 @@ sim_result = function(MM, epsilon, alpha, lambda, phi, noisy=TRUE) {
                    noise_scale=noise_scale))
 }
 
-
 get_lambda_vec = function(all_lambda, lambda_convex_min, alpha, nn_lambda) {
   ## first test glmnet's default lambda list
   rescaled_lambda = all_lambda * (1 - alpha) / 2
@@ -172,7 +160,8 @@ get_lambda_vec = function(all_lambda, lambda_convex_min, alpha, nn_lambda) {
     }
     if (nn_valid_lambda > 0) {
       lambda_vec = c(valid_lambda_vec,
-                     max(valid_lambda_vec) * c(2: (1 + nn_lambda - nn_valid_lambda)))
+                     max(valid_lambda_vec) * c(2: (1 + nn_lambda -
+                                                     nn_valid_lambda)))
       break
     }
     lambda_vec = lambda_convex_min * c(1:nn_lambda)
@@ -181,20 +170,24 @@ get_lambda_vec = function(all_lambda, lambda_convex_min, alpha, nn_lambda) {
   lambda_vec
 }
 
-
 sim_wrapper = function(noisy=TRUE) {
   ## wraper function for the simulations
   res_MM_list = lapply(MM_vec, function(MM) {
     res_epsilon_list = lapply(epsilon_vec, function(epsilon) {
-      lambda_convex_min = param_dtf[((param_dtf$MM==MM) & (param_dtf$epsilon==epsilon)), "lambda_convex_min"]
+      lambda_convex_min =
+        param_dtf[((param_dtf$MM==MM) & (param_dtf$epsilon==epsilon)),
+                  "lambda_convex_min"]
       phi = param_dtf[param_dtf$MM==MM, "phi"][1]
       res_alpha_list = lapply(alpha_vec, function(alpha) {
         ## first test glmnet's default lambda list
         glmnet_fit = glmnet_results[[paste(MM)]][[paste(alpha)]]
-        lambda_vec = get_lambda_vec(glmnet_fit$lambda, lambda_convex_min, alpha, nn_lambda)
+        lambda_vec = get_lambda_vec(glmnet_fit$lambda, lambda_convex_min, alpha,
+                                    nn_lambda)
         res = lapply(lambda_vec, function(lambda) {
-          print(sprintf("Processed MM=%s, epsilon=%s, alpha=%s, lambda=%s", MM, epsilon, alpha, lambda))
-          sim_result(MM=MM, epsilon=epsilon, alpha=alpha, lambda=lambda, phi=phi, noisy=noisy)
+          print(sprintf("Processed MM=%s, epsilon=%s, alpha=%s, lambda=%s", MM,
+                        epsilon, alpha, lambda))
+          sim_result(MM=MM, epsilon=epsilon, alpha=alpha, lambda=lambda,
+                     phi=phi, noisy=noisy)
         })
         names(res) = sapply(lambda_vec, paste)
         return(res)
@@ -209,16 +202,14 @@ sim_wrapper = function(noisy=TRUE) {
   return(res_MM_list)
 }
 
-
 ##########################################
 ## get the simulation results when noise is added
 ## run optimization using cvx in matlab
 ##########################################
-
-
 ptm = proc.time()
 print(paste("Number of nlm fits = ",
-            length(MM_vec) * length(epsilon_vec) * length(alpha_vec) * nn_lambda * nn_sim))
+            length(MM_vec) * length(epsilon_vec) * length(alpha_vec) *
+              nn_lambda * nn_sim))
 
 if (TRUE) {
   require(R.matlab)
@@ -258,14 +249,18 @@ sim_wrapper.glmnet = function() {
   res_MM_list = lapply(MM_vec, function(MM) {
     design_matrix = get_design_matrix(MM=MM)
     res_epsilon_list = lapply(epsilon_vec, function(epsilon) {
-      lambda_convex_min = param_dtf[((param_dtf$MM==MM) & (param_dtf$epsilon==epsilon)), "lambda_convex_min"]
+      lambda_convex_min =
+        param_dtf[((param_dtf$MM==MM) & (param_dtf$epsilon==epsilon)),
+                  "lambda_convex_min"]
       phi = param_dtf[param_dtf$MM==MM, "phi"][1]
       res_alpha_list = lapply(alpha_vec, function(alpha) {
         ## first test glmnet's default lambda list
         glmnet_fit = glmnet_results[[paste(MM)]][[paste(alpha)]]
-        lambda_vec = get_lambda_vec(glmnet_fit$lambda, lambda_convex_min, alpha, nn_lambda)
+        lambda_vec =
+          get_lambda_vec(glmnet_fit$lambda, lambda_convex_min, alpha, nn_lambda)
         res = lapply(lambda_vec, function(lambda) {
-          print(sprintf("Processed MM=%s, epsilon=%s, alpha=%s, lambda=%s", MM, epsilon, alpha, lambda))
+          print(sprintf("Processed MM=%s, epsilon=%s, alpha=%s, lambda=%s", MM,
+                        epsilon, alpha, lambda))
           fit = glmnet(design_matrix, training_data$status, family="binomial",
                        standardize=FALSE, alpha=alpha, lambda=lambda)
           list(optim_result=list(estimate=c(as.vector(fit$a0),
@@ -289,12 +284,12 @@ sim_wrapper.glmnet = function() {
   names(res_MM_list) = sapply(MM_vec, paste)
   return(res_MM_list)
 }
-
 ##
 ptm = proc.time()
 
 print(paste("Number of nlm fits = ",
-            length(MM_vec) * length(epsilon_vec) * length(alpha_vec) * nn_lambda ))
+            length(MM_vec) * length(epsilon_vec) * length(alpha_vec) *
+              nn_lambda))
 no_noise_result = sim_wrapper.glmnet()
 print(floor((proc.time() - ptm) / 60))
 ## save the results

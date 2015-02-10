@@ -3,17 +3,14 @@
 ###############################################################################
 ## read in data
 ###############################################################################
-
 case_path = "./data/case_genotypes_Nov09_interaction1_MAF025_1"
 control_path = "./data/anticase_genotypes_Nov09_interaction1_MAF025_1"
-
 
 case_data = read.table(case_path, header=FALSE, sep='\t', as.is=TRUE)
 case_data = data.frame(case_data)
 rownames(case_data) = case_data[, 2]
 control_data = read.table(control_path, header=FALSE, sep='\t', as.is=TRUE)
 control_data = data.frame(control_data)
-
 
 ## transpose the data then combine cases and controls into a single dataframe
 case_nn = ncol(case_data)-4
@@ -33,7 +30,6 @@ all_data = cbind(status=as.factor(rep(c("control", "case"),
 ###############################################################################
 ## calculate the chi-square statistics and p-values for each snp
 ###############################################################################
-
 chisq_test_results = list()
 for (ii in 1:(ncol(all_data)-1)) {
   if (length(unique(all_data[, 1+ii])) == 1) {
@@ -57,11 +53,9 @@ chisq_pval = sapply(chisq_test_results, function(ee) {
 })
 chisq_pval = as.vector(chisq_pval)
 
-
 ###############################################################################
 ## sample training and testing data
 ###############################################################################
-
 if (TRUE) {
   set.seed(101)
   training_indiv = sample(1:case_nn, case_nn / 2)
@@ -76,5 +70,3 @@ testing_data = all_data[c(testing_indiv, case_nn + testing_indiv), ]
 ###############################################################################
 valid_snps = names(all_data)[-1][!is.na(chisq_stat)]
 valid_snp_chisq = chisq_stat[!is.na(chisq_stat)]
-
-
